@@ -82,14 +82,14 @@ target if there exists an assignment of variables in the pattern to subexpressio
 ### Data sharing in functional data structures
 
 If a data structure such as List is immutable in scala, we can use a list to construct the resulting list of adding an element to that original list.
-This is called data sharing. We say that functional data structures are persistent, meaning that existing references are never
-changed by operations on the data structure.
-Writing purely functional data structures that support different operations efficiently is all about finding clever ways to exploit data sharing. When
-a function definition contains multiple argument groups, type information flows from left to right across these argument groups.
+This is called data sharing. We say that functional data structures are persistent, meaning that existing references are never changed by operations
+on the data structure. Writing purely functional data structures that support different operations efficiently is all about finding clever ways
+to exploit data sharing. When a function definition contains multiple argument groups, type information flows from left to right across these argument
+groups.
 
 ### Trees
 
 An ADT is just a data type defined by one or more data constructors, each of which may contain zero or more arguments (_List_ is an example). We do
-typically use ADTs for situations where the set of cases is closed (known to be fixed).
+typically use ADTs for situations where the set of cases is closed or known to be fixed (For example a Tree structure has either a Leaf or a Branch).
 
 ## Chapter 4: Handling Errors without exceptions<a name="Chapter4"></a>
