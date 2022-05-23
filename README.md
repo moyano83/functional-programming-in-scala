@@ -68,3 +68,26 @@ thing to want to do that Scala's standard library provides `compose` as a method
 compose two functions f and g, we simply say f compose g. It also provides an `andThen` method. `f andThen g` is the same as `g compose f`.
 
 ## Chapter 3: Functional Data Structures<a name="Chapter3"></a>
+
+### Defining functional data structures
+
+A functional data structure is operated on using only pure functions, functional data structures are by definition immutable.
+
+### Pattern Matching
+
+Scala has something similar to the _switch_ in java, which is pattern matching, although if any of the cases match in scala, the result of the
+expression is the result of that particular case (the first one it matches). What determines if a pattern matches an expression? A pattern matches the
+target if there exists an assignment of variables in the pattern to subexpressions of the target that make it structurally equivalent to the target.
+
+### Data sharing in functional data structures
+
+If a data structure such as List is immutable in scala, we can use a list (let's call it list1) to construct the result list of adding an element
+to that list. This is called data sharing. We say that functional data structures are persistent, meaning that existing references are never changed
+by operations on the data structure.
+Writing purely functional data structures that support different operations efficiently is all about finding clever ways to exploit data sharing. When
+a function definition contains multiple argument groups, type information flows from left to right across these argument groups.
+
+### Trees
+
+An ADT is just a data type defined by one or more data constructors, each of which may contain zero or more arguments (_List_ is an example). We do
+typically use ADTs for situations where the set of cases is closed (known to be fixed).
