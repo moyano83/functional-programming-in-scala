@@ -93,3 +93,51 @@ An ADT is just a data type defined by one or more data constructors, each of whi
 typically use ADTs for situations where the set of cases is closed or known to be fixed (For example a Tree structure has either a Leaf or a Branch).
 
 ## Chapter 4: Handling Errors without exceptions<a name="Chapter4"></a>
+
+We can represent failures and exceptions with ordinary values, and we can write higher-order functions that abstract out common patterns of error
+handling and recovery.
+
+### The good and bad aspects of exceptions
+
+RT expression may be substituted with the value it refers to, and this substitution should preserve program meaning. RT expressions does not depend on
+context and may be reasoned about locally, whereas the meaning of non-RT expressions is context-dependent and requires more global reasoning. If an
+exception is thrown, then execution of the program depends on where this exception is thrown.
+
+    * Exceptions break RT and introduce context dependence, moving us away from the simple reasoning of the substitution model. Exceptions should 
+      be used only for error handling, not for control flow.
+    * Exceptions are not type-safe
+
+Exceptions allow us to consolidate and centralize error-handling logic, but instead of throwing an exception, we return a value indicating that an
+exceptional condition has occurred.
+
+### Possible alternatives to exceptions
+
+Returning an error code or something such as `Double.NaN` if an arithmetic operation is not defined is not recommended due to:
+
+    * It allows errors to silently propagate. The caller can forget to check this condition and won't be alerted by the compiler
+    * Results in a fair amount of boilerplate code at call sites, with explicit if statements to check whether the caller has received a valid result 
+    * It's not applicable to polymorphic code. For some output types, we might not have a sentinel value of that type even if we wanted to.
+    * It demands a special policy or calling convention of callers
+
+We need a way to defer the decision of how to handle undefined cases so that they can be dealt with at the most appropriate level.
+
+### The Option data type
+
+The solution is to represent explicitly in the return type that a function may not always have an answer. `Option` deals with this, it takes each
+value of the input type to exactly one value of the output type. Option is convenient as we can factor out common patterns of error handling
+via higher-order functions, freeing us from writing the usual boilerplate that comes with exception-handling code.
+
+A common pattern is to transform an Option via calls to `map`, `flatMap`, and/or `filter`, and then use `getOrElse` to do error handling at the end.
+`orElse` is similar to `getOrElse`, except that we return another Option if the first is undefined.
+
+We can `lift` ordinary functions to become functions that operate on Option. Any function that we already have lying around can be transformed
+(via `lift`) to operate within the context of a single Option value. Since lifting functions is so common in Scala, Scala provides a syntactic
+construct called the _for-comprehension_ that it expands automatically to a series of `flatMap` and `map` calls.
+
+### The Either data type
+
+One thing you may have noticed with Option is that it doesn't tell us anything about what went wrong in the case of an exceptional condition. The
+Either data type represents, in a very general way, values that can be one of two things, it's a disjoint union of two types. When we use it to
+indicate success or failure, by convention the Right constructor is reserved for the success case.
+
+## Chapter 5: Strictness and laziness<a name="Chapter5"></a>
