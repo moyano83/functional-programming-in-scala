@@ -6,6 +6,8 @@
 2. [Chapter 2: Getting started with functional programming in Scala](#Chapter2)
 3. [Chapter 3: Functional data structures](#Chapter3)
 4. [Chapter 4: Handling errors without exceptions](#Chapter4)
+5. [Chapter 5: Strictness and laziness](#Chapter5)
+6. [Chapter 6: Purely functional state](#Chapter6)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -141,3 +143,41 @@ Either data type represents, in a very general way, values that can be one of tw
 indicate success or failure, by convention the Right constructor is reserved for the success case.
 
 ## Chapter 5: Strictness and laziness<a name="Chapter5"></a>
+
+Composing programs using higher-order functions like `map` and `filter` instead of writing monolithic loops is possible through the use of
+non-strictness (laziness).
+
+### Strict and non-strict functions
+
+Non-strictness is a property of a function, it means that the function may choose not to evaluate one or more of its arguments. A strict function
+always evaluates its arguments (`&&` and `||` found in many programming languages including Scala, are non-strict).
+In Scala, we can write non-strict functions by accepting some of our arguments unevaluated. We can express this by passing a zero-argument function
+like `() => A`, where the unevaluated form of an expression is called a thunk, and we can force the thunk to evaluate the expression and get a result.
+We're passing a function of no arguments in place of each non-strict parameter, and then explicitly calling this function to obtain a result in
+the body. Scala allows to rewrite the previous expression omitting the empty parentheses `theArg: => A`. In the body of the function, we don't need to
+do anything special to evaluate an argument annotated with `=>`. We just reference the identifier as usual. The argument passed like this would be
+evaluated once for each place it's referenced in the body of the function although you can always store the value of the expression in a `lazy val`
+so it is only evaluated one within the body of the function, adding the lazy keyword to a val declaration will cause Scala to delay evaluation of
+the right-hand side of that lazy val declaration until it’s first referenced. A non-strict function in Scala takes its arguments by name rather than
+by value.
+
+### An extended example: lazy lists
+
+Now we'll see how chains of transformations on streams are fused into a single pass through the use of laziness. We typically want to cache the values
+of a Cons node, once they are forced. We avoid this problem by defining smart constructors, which is what we call a function for constructing a data
+type that ensures some additional invariant or provides a slightly different signature than the real constructors used for pattern matching. By
+convention, smart constructors typically lowercase the first letter of the corresponding data constructor.
+
+### Separating program description from evaluation
+
+A major theme in functional programming is separation of concerns. We want to separate the description of computations from actually running them.
+Laziness lets us separate the description of an expression from the evaluation of that expression.
+
+### Infinite streams and corecursion
+
+Because they're incremental, the functions written with lazyness also work for infinite streams: `val ones: Stream[Int] = Stream.cons(1, ones)`.
+A corecursive function produces data as oppose as a recursive function, which consumes it. Whereas recursive functions terminate by recursing on
+smaller inputs, corecursive functions need not terminate so long as they remain productive, which just means that we can always evaluate more of the
+result in a finite amount of time. Corecursion is also sometimes called guarded recursion, and productivity is also sometimes called cotermination. 
+
+## Chapter 6: Purely functional state<a name="Chapter6"></a>
