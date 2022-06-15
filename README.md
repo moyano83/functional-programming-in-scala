@@ -12,7 +12,7 @@
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
 Functional programming is reasoning in tearms of pure functions, that is, functions that does not have side effects. A formal definition of a pure
-function is "a function _f_ with input type _A_ and output type _B_ (written in Scala as a single type: `A => B`, pronounced “A to B” or “A arrow B”)
+function is "a function _f_ with input type _A_ and output type _B_ (written in Scala as a single type: `A => B`, pronounced "A to B" or "A arrow B")
 is a computation that relates every value a of type _A_ to exactly one value b of type _B_ such that b is determined solely by the value of a. Any
 changing state of an internal or external process is irrelevant to computing the result _f(a)_.
 We can formalize this idea of pure functions using the concept of referential transparency (RT). This is a property of expressions in general and not
@@ -158,7 +158,7 @@ the body. Scala allows to rewrite the previous expression omitting the empty par
 do anything special to evaluate an argument annotated with `=>`. We just reference the identifier as usual. The argument passed like this would be
 evaluated once for each place it's referenced in the body of the function although you can always store the value of the expression in a `lazy val`
 so it is only evaluated one within the body of the function, adding the lazy keyword to a val declaration will cause Scala to delay evaluation of
-the right-hand side of that lazy val declaration until it’s first referenced. A non-strict function in Scala takes its arguments by name rather than
+the right-hand side of that lazy val declaration until it's first referenced. A non-strict function in Scala takes its arguments by name rather than
 by value.
 
 ### An extended example: lazy lists
@@ -178,6 +178,76 @@ Laziness lets us separate the description of an expression from the evaluation o
 Because they're incremental, the functions written with lazyness also work for infinite streams: `val ones: Stream[Int] = Stream.cons(1, ones)`.
 A corecursive function produces data as oppose as a recursive function, which consumes it. Whereas recursive functions terminate by recursing on
 smaller inputs, corecursive functions need not terminate so long as they remain productive, which just means that we can always evaluate more of the
-result in a finite amount of time. Corecursion is also sometimes called guarded recursion, and productivity is also sometimes called cotermination. 
+result in a finite amount of time. Corecursion is also sometimes called guarded recursion, and productivity is also sometimes called cotermination.
 
 ## Chapter 6: Purely functional state<a name="Chapter6"></a>
+
+### Purely functional random number generation
+
+A Random number generator depends on previous invocations of its methods, and therefore it is not easily testable because it is not referentially
+transparent. The key to recovering referential transparency is to make the state updates explicit, so instead of updating the state as a side effect,
+we simply return the new state along with the value that we're generating. In this way we separate the concern of computing what the next state is
+from the concern of communicating the new state to the rest of the program.
+
+```scala
+def nextInt() // Instead of mutating the data in place
+def nextInt(s: RandomGenerator) // we pass the state along 
+```
+
+### Making stateful APIs pure
+
+Whenever we use the pattern described above, we make the caller responsible for passing the computed next state through the rest of the program.
+This can be tedious, so it is possible to refactor the common code.
+
+### A better API for state actions
+
+Looking at the implementation described, we notice that each of our functions has a type of the form `Generator => (A, Generator)` for some type A.
+Functions of this type are called state actions or state transitions because they transform _Generator_ states from one to the next. These state
+actions can be combined using combinators, which are higher-order functions. If we define a type alias for these type of functions like
+`type Gen[+A] = Generator => (A, Generator)`, we can think of a value of type `Gen[+A]` as a randomly generated A, although it is really a
+a program that depends on some Generator, uses it to generate an A, and also transitions the Generator to a new state that can be used by another
+action later. We can now turn methods such as _nextInt_ into values of this new type: `val int: Gen[Int] = _.nextInt`. We want to write combinators
+that let us combine `Gen` actions while avoiding explicitly passing along the `Generator` state. We end up with a kind of domain-specific language
+that does this passing for us:
+
+```scala
+def unit[A](a: A): Gen[A] = gen => (a, gen)
+def map[A, B](s: Gen[A])(f: A => B): Gen[B] = gen => { // Remember Gen[_] is an alias for Generator => (A, Generator)
+  val (a, gen2) = s(gen)
+  (f(a), gen2)
+} 
+```
+
+#### Combining state actions
+
+What if we want to combine state actions? we need is a new combinator `map2` that can combine two Gen actions into one using a binary rather than
+unary function: `def map2[A,B,C](ra: Rand[A], rb: Rand[B])(f: (A, B) => C): Rand[C]`.
+
+#### Nesting state actions
+
+If we progress towards an implementation that doesn't explicitly mention or pass along the `Gen` value, we might encounter situations where this is
+not viable like if we need to call the function recursively, since we don't have a `Gen` to pass. For this we need to use a combinator that does
+this pass for us. `flatMap` allows us to generate a random A with `Gen[A]`, and then take that A and choose a `Gen[B]` based on its value:
+`def flatMap[A,B](f: Gen[A])(g: A => Gen[B]): Gen[B]`.
+
+### A general state action data type
+
+The functions (unit, map, map2, flatMap) described above are general-purpose functions for working with state actions, and don't care about the type
+of the state, so we can modify map to be more general: `def map[S,A,B](a: S => (A,S))(f: A => B): S => (B,S)`. Given this, we can also modify the
+type described before to be more general too: `type State[S,+A] = S => (A,S)`.
+Here _State_ is short for computation that carries some state along, or state action, state transition, or even statement. This can be refactored in
+its own class like:
+
+```scala
+case class State[S, +A](run: S => (A, S))
+```
+
+Using this type we can write general-purpose functions for capturing common patterns of stateful programs.
+
+### Purely functional imperative programming
+
+In the imperative programming paradigm, a program is a sequence of statements where each statement may modify the program state. In our case the
+"statements" are really State actions. _for-comprehensions_ are a good ally to help to maintain an imperative programming style as oppose to 
+nested function calls.
+To facilitate this kind of imperative programming with for-comprehensions, we only need two primitive `State` combinators: one for reading the 
+state and one for writing it (get and set).
