@@ -8,6 +8,8 @@
 4. [Chapter 4: Handling errors without exceptions](#Chapter4)
 5. [Chapter 5: Strictness and laziness](#Chapter5)
 6. [Chapter 6: Purely functional state](#Chapter6)
+7. [Chapter 7: Purely functional parallelism](#Chapter7)
+8. [Chapter 8: Property-based testing](#Chapter8)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -190,8 +192,8 @@ we simply return the new state along with the value that we're generating. In th
 from the concern of communicating the new state to the rest of the program.
 
 ```scala
-def nextInt() // Instead of mutating the data in place
-def nextInt(s: RandomGenerator) // we pass the state along 
+def nextInt(): Int // Instead of mutating the data in place
+def nextInt(s: RandomGenerator): (Int, RandomGenerator) // we pass the state along and return it
 ```
 
 ### Making stateful APIs pure
@@ -204,11 +206,11 @@ This can be tedious, so it is possible to refactor the common code.
 Looking at the implementation described, we notice that each of our functions has a type of the form `Generator => (A, Generator)` for some type A.
 Functions of this type are called state actions or state transitions because they transform _Generator_ states from one to the next. These state
 actions can be combined using combinators, which are higher-order functions. If we define a type alias for these type of functions like
-`type Gen[+A] = Generator => (A, Generator)`, we can think of a value of type `Gen[+A]` as a randomly generated A, although it is really a
-a program that depends on some Generator, uses it to generate an A, and also transitions the Generator to a new state that can be used by another
-action later. We can now turn methods such as _nextInt_ into values of this new type: `val int: Gen[Int] = _.nextInt`. We want to write combinators
-that let us combine `Gen` actions while avoiding explicitly passing along the `Generator` state. We end up with a kind of domain-specific language
-that does this passing for us:
+`type Gen[+A] = Generator => (A, Generator)`, we can think of a value of type `Gen[+A]` as a randomly generated A, although it is really a program
+that depends on some Generator, uses it to generate an A, and also transitions the Generator to a new state that can be used by another action later.
+We can now turn methods such as _nextInt_ into values of this new type: `val int: Gen[Int] = _.nextInt`. We want to write combinators that let us
+combine `Gen` actions while avoiding explicitly passing along the `Generator` state. We end up with a kind of domain-specific language that does this
+passing for us:
 
 ```scala
 def unit[A](a: A): Gen[A] = gen => (a, gen)
@@ -247,7 +249,129 @@ Using this type we can write general-purpose functions for capturing common patt
 ### Purely functional imperative programming
 
 In the imperative programming paradigm, a program is a sequence of statements where each statement may modify the program state. In our case the
-"statements" are really State actions. _for-comprehensions_ are a good ally to help to maintain an imperative programming style as oppose to 
+"statements" are really State actions. _for-comprehensions_ are a good ally to help to maintain an imperative programming style as oppose to
 nested function calls.
-To facilitate this kind of imperative programming with for-comprehensions, we only need two primitive `State` combinators: one for reading the 
+To facilitate this kind of imperative programming with for-comprehensions, we only need two primitive `State` combinators: one for reading the
 state and one for writing it (get and set).
+
+## Chapter 7: Purely functional parallelism<a name="Chapter7"></a>
+
+### Choosing data types and functions
+
+Imaging you want to sum a list of integers, you can do this with `foldLeft` (sequentially) or using divide and conquer strategy which can be
+parallelized:
+
+```scala
+def sum(ints: IndexedSeq[Int]): Int =
+  if (ints.size <= 1) ints.headOption getOrElse 0
+  else {
+    val (l, r) = ints.splitAt(ints.length / 2)
+    sum(l) + sum(r)
+  }
+```
+
+#### A data type for parallel computations
+
+From looking at `sum(l) + sum(r)`, we can see that any data type we might choose to represent our parallel computations needs to be able to contain a
+result. We can invent a container type for our result, `Par[A]`, and legislate the existence of the functions we need:
+
+`def unit[A](a: => A): Par[A]` for taking an unevaluated A and returning a computation that might evaluate it in a separate thread. We call it
+unit because in a sense it creates a unit of parallelism that just wraps a single value
+
+`def get[A](a: Par[A]): A` for extracting the resulting value from a parallel computation
+
+With the above, we can re-write the sum function like:
+
+```scala
+def sum(ints: IndexedSeq[Int]): Int =
+  if (ints.size <= 1)
+    ints.headOption.getOrElse(0)
+  else {
+    val (l, r) = ints.splitAt(ints.length / 2)
+    val sumL: Par[Int] = Par.unit(sum(l))
+    val sumR: Par[Int] = Par.unit(sum(r))
+    Par.get(sumL) + Par.get(sumR)
+  }
+```
+
+For this to work, we need to be able to combine asynchronous computations without waiting for them to finish. But in the example above, unit has a
+side effect in regards with `get`, which waits for the response.
+
+#### Combining parallel computations
+
+We can replace the `Par.get(sumL) + Par.get(sumR)` with a new operation like `Par.map2(sum(l), sum(r))(_ + _)`, which should be lazy and should begin
+immediate execution of both sides in parallel. This also addresses the problem of giving neither side priority over the other.
+
+#### Explicit forking
+
+`def fork[A](a: => Par[A]): Par[A]` is a function that explicitly request the argument to be run in a separate logical thread. This function solves
+the problem of instantiating our parallel computations too strictly and it puts the parallelism explicitly under programmer control. With this in
+place we can define another function `def lazyUnit[A](a: => A): Par[A] = fork(unit(a))`.
+Should evaluation be the responsibility of `fork` or of `get`? Let's rename `get` function to `run`, and dictate that this is where the parallelism
+actually gets implemented `def run[A](a: Par[A]): A`. `Par` is now just a pure data structure, `run` has to have some means of implementing the
+parallelism, whether it spawns new threads, delegates tasks to a thread pool, or uses some other mechanism.
+
+### Picking a representation
+
+We know run needs to execute asynchronous tasks, there's already a class that we can use in the Java Standard Library
+`java.util.concurrent.ExecutorService`.
+
+```scala
+class ExecutorService {
+  def submit[A](a: Callable[A]): Future[A]
+}
+```
+
+If we assume that our run function has access to an `ExecutorService` we can rewrite `run` as `def run[A](s: ExecutorService)(a: Par[A]): A`. With
+this in mind we can also rewrite the data type `Par[A]` as:
+
+```scala
+type Par[A] = ExecutorService => Future[A]
+def run[A](s: ExecutorService)(a: Par[A]): Future[A] = a(s)
+```
+
+### Refining the API
+
+When designing libraries, often a function that seems to be primitive will turn out to be expressible using some more powerful primitive even
+implementing operations as new primitives. In some cases, we can even implement the operations more efficiently by assuming something about the
+underlying representation of the data types we're working with.
+
+### The algebra of an API
+
+We often get far just by writing down the type signature for an operation we want, and then "following the types" to an implementation. We can
+almost forget the concrete domain and just focus on lining up types. We treat the API as an algebra, or an abstract set of operations along with a
+set of laws or properties we assume to be true, and simply doing formal symbol manipulation following the rules of the game specified by this algebra.
+In functional programming it's easy, and expected, to factor out common functionality into generic, reusable components that can be composed. Side
+effects hurt compositionality, but more generally, any hidden or out-of-band assumption or behavior that prevents us from treating our components
+as black boxes makes composition difficult or impossible. Review of the sets of algebras you want your API to hold to:
+
+#### The law of mapping
+
+Choosing laws has consequences: it places constraints on what the operations can mean, determines what implementation choices are possible, and
+affects what other properties can be true, for example `map(unit(1))(_ + 1) == unit(2)`. Just as we can generalize functions, we can generalize laws.
+For example `map(unit(x))(f) == unit(f(x))`. We can define laws in terms of simpler laws that each say just one thing, and we can also determine
+what this mapping operation can't do, for example to throw an exception. Given `map(y)(id) ==y`, it must be true that `map(unit(x))(f)==unit(f(x))`.
+Since we get this second law or theorem for free, simply because of the parametricity of map, it's sometimes called a free theorem.
+
+#### The law of forking
+
+Fork should not affect the result of a parallel computation: `fork(x) == x`, which means that `fork(x)` should do the same thing as `x`, but
+asynchronously, in a logical thread separate from the main thread. If this law didn't always hold, we'd have to somehow know when it was safe to call
+without changing meaning, without any help from the type system.
+
+#### Breaking the law: a subtle bug
+
+Is it possible to break the above law? `x` might be some combination of the operations _fork_, _unit_, and _map2_ , but what about `ExecutorService`?
+When using an `ExecutorService` backed by a thread pool of bounded size, it's very easy to run into a deadlock. When you find counterexamples like
+this, you have two choices—you can try to fix your implementation such that the law holds, or you can refine your law a bit, to state more explicitly
+the conditions under which it holds.
+
+### Refining combinators to their most general form
+
+Functional design is an iterative process. After you write down your API and have at least a prototype implementation, you might find that your new
+scenarios require new combinators. It’s a good idea to see if you can refine the combinator you need to its most general form. For example if you
+have a combinator that returns the result of an operation passed as an argument, or the result of another operator, then you might want to
+generalize the answer for a combinator that chooses between N computations, and make the described combinator a subset of N=2 for this general
+combinator. You can try to generalize for different argument types and collections.
+
+## Chapter 8: Property-based testing<a name="Chapter8"></a>
