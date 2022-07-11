@@ -10,6 +10,7 @@
 6. [Chapter 6: Purely functional state](#Chapter6)
 7. [Chapter 7: Purely functional parallelism](#Chapter7)
 8. [Chapter 8: Property-based testing](#Chapter8)
+9. [Chapter 9: Parser combinators](#Chapter9)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -369,9 +370,213 @@ the conditions under which it holds.
 ### Refining combinators to their most general form
 
 Functional design is an iterative process. After you write down your API and have at least a prototype implementation, you might find that your new
-scenarios require new combinators. It’s a good idea to see if you can refine the combinator you need to its most general form. For example if you
+scenarios require new combinators. It's a good idea to see if you can refine the combinator you need to its most general form. For example if you
 have a combinator that returns the result of an operation passed as an argument, or the result of another operator, then you might want to
 generalize the answer for a combinator that chooses between N computations, and make the described combinator a subset of N=2 for this general
 combinator. You can try to generalize for different argument types and collections.
 
 ## Chapter 8: Property-based testing<a name="Chapter8"></a>
+
+The general idea of property-based testing is to decouple the specification of program behavior from the creation of test cases. The programmer
+focuses on specifying the behavior of programs and giving high-level constraints on the test cases; the framework then automatically generates test
+cases that satisfy these constraints.
+
+### A brief tour of property-based testing
+
+An example of property-base testing for _ScalaCheck_ would be something like this:
+
+```scala
+val intList = Gen.listOf(Gen.choose(0, 100))
+val prop = forAll(intList)(ns => ns.reverse.reverse == ns) && forAll(intList)(ns => ns.headOption == ns.reverse.lastOption)
+val failingProp = forAll(intList)(ns => ns.reverse == ns) // This is obviously going to fail at some point
+// Check the above by using the method check. i.e.
+prop.check
+```
+
+`intList` is not a `List[Int]`, but a `Gen[List[Int]]`, which is something that knows how to generate test data of type `List[Int]`. The function
+`forAll` creates a property by combining a generator of type `Gen[A]` with some predicate of type `A => Boolean`. When we invoke `prop.check`,
+ScalaCheck will randomly generate `List[Int]` values to try to find a case that falsifies the predicates supplied.
+Other useful features that property testing libraries might come with includes:
+
+    * Test case minimization: If a test fails, the framework tries smaller sizes until it finds the smallest test case that also fails    
+    *Exhaustive test case generation: When the domain (set of values that could be produced by some Gen[A]) is small enough we may test all its values
+
+### Choosing data types and functions
+
+#### Initial snippets of an API
+
+Looking at the previous example, we can see `Gen` is a parametric type, and we have two methods for creating generators:
+
+```scala
+def listOf[A](a: Gen[A]): Gen[List[A]]
+def listOfN[A](n: Int, a: Gen[A]): Gen[List[A]] // Different name but same behaviour than Gen.listOf although we specify the size of the list we want
+```
+
+We also have a method `forAll` which we can codify as:
+
+```scala
+def forAll[A](a: Gen[A])(f: A => Boolean): Prop
+```
+
+Where `Prop` is the type result of binding `Gen` with a predicate. We can see from the example above that this type has a method `&&`, so:
+
+```scala
+trait Prop {
+  def &&(p: Prop): Prop
+}
+```
+
+#### The meaning and API of properties
+
+With this types above, we can decide what they _mean_. We know `Prop` has `&&` and `check` methods, the later has side effects like printing the
+result to the console (must return `Unit` then). But if we return `Unit` we can't really combine the Props in the `&&` method, potentially
+throwing away information, so we must return a meaningful type holding the result of the check (which can be as simple as a Boolean).
+For the purpose of the example, we will have the trait `trait Prop { def check: Either[(FailedCase, SuccessCount), SuccessCount]}`, where `FailedCase`
+can be just a simple String with the description of the parameters that failed the test.
+
+#### The meaning and API of generators
+
+A valid `Gen[A]` implementation might choose to return values of type A by randomly generating these values. Similar to the example of `Rand` in
+chapter 6, we could just make Gen a type that wraps a State transition over a random number generator: `case class Gen[A](sample: State[RNG,A])`.
+With this type, it is possible to derive the following methods:
+
+```scala
+def unit[A](a: => A): Gen[A]
+def boolean: Gen[Boolean]
+def listOfN[A](n: Int, g: Gen[A]): Gen[List[A]]
+```
+
+#### Generators that depend on generated values
+
+Because we might get into a situation where a generator depends on the value produced by other, we need a `def flatMap[B](f: A => Gen[B]): Gen[B]`
+operation. Other useful methods we might need includes:
+
+```scala
+def listOfN(size: Gen[Int]): Gen[List[A]]
+def union[A](g1: Gen[A], g2: Gen[A]): Gen[A] // combining two generators of the same type into one
+def weighted[A](g1: (Gen[A], Double), g2: (Gen[A], Double)): Gen[A] // similar to union but generates values from each Gen with weighted probability
+```
+
+#### Refining the Prop data type
+
+Our Gen representation has revealed information about the requirements for Prop. Prop is missing how many test cases to examine before we consider the
+property to have passed the test:
+
+```scala
+type TestCases = Int
+type Result = Either[(FailedCase, SuccessCount), SuccessCount]
+
+case class Prop(run: TestCases => Result)
+```
+
+Because the caller of run learns nothing new by being told the success count, we can omit this transforming the `Either` into an `Option`. Because
+`None` is reserved for failed cases (but we are using for the success ones here), we can create a specific type for this instead:
+
+```scala
+sealed trait Result {
+  def isFalsified: Boolean
+}
+
+case object Passed extends Result {
+  def isFalsified = false
+}
+
+case class Falsified(failure: FailedCase, successes: SuccessCount) extends Result {
+  def isFalsified = true
+}
+```
+
+The `forAll` method defined before doesn't have enough information to return a Prop. Prop should then have all the information needed to generate
+test cases, which means we have to pass the Random generator dependency along:
+
+```scala
+case class Prop(run: (TestCases, Rand) => Result)
+```
+
+With this in mind, we have all the required information to generate the `forAll` method:
+
+```scala
+def forAll[A](as: Gen[A])(f: A => Boolean): Prop = Prop {
+  (n, rng) =>
+    randomStream(as)(rng).zip(Stream.from(0)).take(n).map {
+      case (a, i) => try {
+        if (f(a)) Passed else Falsified(a.toString, i)
+      } catch {
+        case e: Exception => Falsified(buildMsg(a, e), i)
+      }
+    }.find(_.isFalsified).getOrElse(Passed)
+}
+def randomStream[A](g: Gen[A])(rng: RNG): Stream[A] = Stream.unfold(rng)(rng => Some(g.sample.run(rng)))
+def buildMsg[A](s: A, e: Exception): String = s"test: $s\n" + s"exception: ${e.getMessage}\n" + s"stack trace:\n ${e.getStackTrace.mkString("\n")}"
+```
+
+### Test case minimization
+
+Ideally we’d like our framework to find the smallest or simplest failing test case, there are two general approaches we could take:
+
+    * Shrinking: After a failing test case, run a separate procedure to minimize the test case by decreasing its size until it no longer fails
+    * Sized generation: generate our test cases in order of increasing size and complexity until we find a failure 
+
+Here we'll implement sized generation. Instead of modifying `Gen` data type, we'll introduce sized generation as a separate layer in our library.
+
+```scala
+case class SGen[+A](forSize: Int => Gen[A])
+```
+
+`SGen` is expecting to be told a size, but `Prop` doesn't receive any size information. We need to add this as a dependency to Prop:
+
+```scala
+case class Prop(run: (MaxSize, TestCases, RNG) => Result)
+```
+
+### Using the library and improving its usability
+
+Usability is somewhat subjective, but we generally like to have convenient syntax and appropriate helper functions for common usage patterns.
+
+#### Some simple examples
+
+Let's put an example: find the maximum. The maximum of a list should be greater than or equal to every other element in the list:
+
+```scala
+val smallInt = Gen.choose(-10, 10)
+val maxProp = forAll(listOf(smallInt)) { ns =>
+  val max = ns.max
+  !ns.exists(_ > max)
+}
+```
+
+Calling run on this function is cumbersome because the amount of setup that needs to be done, better to create a helper method with some default
+values.
+
+### Testing higher-order functions and future directions
+
+We still don't currently have a good way to test higher-order functions. We could take the approach of only examining particular arguments when
+testing higher-order functions. For example, the `takeWhile` function:
+
+```scala
+val isEven = (i: Int) => i % 2 == 0
+val takeWhileProp = Prop.forAll(Gen.listOf(int))(ns => ns.takeWhile(isEven).forall(isEven))
+```
+
+There a way we could let the testing framework handle generating functions to use with `takeWhile`. An option is to ignore the input of the
+generator and just return constant output, but this is not very efficient.
+
+### The laws of generators
+
+Many of the functions implemented for the `Gen` type look quite similar to other functions we defined on `Par`, `List`, `Stream`, and `Option`.
+For example:
+
+```scala
+def map[A, B](a: Par[A])(f: A => B): Par[B]
+def map[B](f: A => B): Gen[B]
+```
+
+Does this functions share similar-looking signatures or do they satisfy the same laws as well? Consider maping with the identity function:
+```scala
+map(x)(id) == x
+```
+
+This law hold for the implementation of `Gen`, `Stream`, `List`, `Option`, and `State`. This proves that these functions share similar-looking 
+signatures and have analogous meanings in their respective domains.
+
+## Chapter 9: Parser combinators<a name="Chapter9"></a>
