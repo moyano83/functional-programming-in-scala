@@ -572,11 +572,148 @@ def map[B](f: A => B): Gen[B]
 ```
 
 Does this functions share similar-looking signatures or do they satisfy the same laws as well? Consider maping with the identity function:
+
 ```scala
 map(x)(id) == x
 ```
 
-This law hold for the implementation of `Gen`, `Stream`, `List`, `Option`, and `State`. This proves that these functions share similar-looking 
+This law hold for the implementation of `Gen`, `Stream`, `List`, `Option`, and `State`. This proves that these functions share similar-looking
 signatures and have analogous meanings in their respective domains.
 
 ## Chapter 9: Parser combinators<a name="Chapter9"></a>
+
+Up until now, we have designed our interface first, along with associated laws, and let this guide the choice of data type representations.
+_Algebraic design_ is an evolution of this.
+
+### Designing an algebra, first
+
+The laws referred before usually have come after we designed the API and types, but now we’ll start with the algebra, including its laws, and decide
+on a representation later (known as _algebraic design_). On this example we'll choose to design a library for parsers, focusing on its expressiveness.
+The library should generate parser errors if it receives an input it doesn't expect.
+A good and simple domain to start with is parsing various combinations of letters like "dsakjdjaks". Let's start with a simple parser for a letter:
+
+```scala
+def char(c: Char): Parser[Char]
+```
+
+The function returns a parameterized type `Parser` and if it succeeds, we want to get a result that has some useful type, and if it fails, we expect
+information about the failure. This parser needs to be run to get a result, so we create a function accordingly:
+
+```scala
+def run[A](p: Parser[A])(input: String): Either[ParseError, A]
+```
+
+We can make this explicit in a trait:
+
+```scala
+trait Parsers[ParseError, Parser[+_]] {
+  def run[A](p: Parser[A])(input: String): Either[ParseError, A]
+
+  def char(c: Char): Parser[Char]
+}
+```
+
+In the above, the `[+_]` is the scala notation for a type that is itself a type constructor. Making `ParseError` a type argument lets the `Parsers`
+interface work for any representation of `ParseError`, and making `Parser[+_]` a type parameter means that the interface works for any
+representation of `Parser`. With this we can define a law `run(char(c))(c.toString) == Right(c)` being 'c' any char.
+We can construct a more complex parser for a random string and the above law should still remain valid (adjusting the types obviously).
+
+```scala
+def string(s: String): Parser[String]
+```
+
+Let's combine this parser with an 'or' function:
+
+```scala
+def or[A](s1: Parser[A], s2: Parser[A]): Parser[A]
+```
+
+And to avoid having to call explicitly the conversion functions, we can create a `ParserOps` class to use implicits to do the transformations:
+
+```scala
+trait Parsers[ParseError, Parser[+_]] {
+  self =>
+  def or[A](s1: Parser[A], s2: Parser[A]): Parser[A]
+
+  implicit def string(s: String): Parser[String]
+
+  implicit def operators[A](p: Parser[A]) = ParserOps[A](p)
+
+  implicit def asStringParser[A](a: A)(implicit f: A => Parser[String]): ParserOps[String] = ParserOps(f(a))
+
+  case class ParserOps[A](p: Parser[A]) {
+    def |[B >: A](p2: Parser[B]): Parser[B] = self.or(p, p2)
+
+    def or[B >: A](p2: => Parser[B]): Parser[B] = self.or(p, p2)
+  }
+}
+```
+
+What if we want to add repetitions? We can code that like:
+
+```scala
+def listOfN[A](n: Int, p: Parser[A]): Parser[List[A]] // this should hold true for run(listOfN(3, "ab" | "cad"))("ababcad") == Right("ababcad")
+```
+
+### A possible algebra
+
+We want to add a new method to add a parser that counts the number of occurrences of a certain character, we start with:
+
+```scala
+def many[A](p: Parser[A]): Parser[List[A]]
+```
+
+We could have returned a `Parser[Int]`, but we can define a second function that knows how to extract the list length:
+
+```scala
+def map[A, B](p: Parser[A])(f: A => B): Parser[B]
+```
+
+With the above, we can always pass the result of `many` to `map`, we expect `map` to be _structure preserving_ so we can formalize this by
+stipulating the now-familiar law: `map(p)(a => a) == p`.
+
+#### Slicing and nonempty repetition
+
+The combination of `many` and `map` certainly seems inefficient to construct a List[Char] to discard its values and extract its length. We can
+construct a `Parser` to see what portion of the input string it examines.
+
+```scala
+def slice[A](p: Parser[A]): Parser[String] // run(slice(('a'|'b') .many))("aaba") results in Right("aaba")
+```
+
+Note that there’s no implementation here yet. We’re still just coming up with our desired interface. Now we want to recognize one or more 'a'
+characters, so it seems we need some way of running one parser, followed by another, assuming the first is successful. Let’s add that:
+
+```scala
+// The second parameter is non strict cause if the first Parser fails, the second won’t even be consulted. We should change the or function in the 
+// same way
+def product[A, B](p: Parser[A], p2: => Parser[B]): Parser[(A, B)] 
+```
+
+We can try to start implementing the methods (considering the map2 function defined before). We start with `many` which tries running `p`, followed by
+`many(p)` again and again until the attempt to parse `p` fails:
+
+```scala
+// We want p followed by many(p) again, and that we want to combine their results with :: to construct a list of results
+def many[A](p: Parser[A]): Parser[List[A]] = map2(p, many(p))(_ :: _) or succeed(List()) 
+```
+
+### Handling context sensitivity
+
+Recap the primitives we have so far:
+
+    * string(s): Recognizes and returns a single String
+    * slice(p): Returns the portion of input inspected by p if successful
+    * succeed(a): Always succeeds with the value a
+    * map(p)(f): Applies the function f to the result of p, if successful
+    * product(p1,p2): Sequences two parsers, running p1 and then p2, and returns the pair of their results if both succeed
+    * or(p1,p2): Chooses between two parsers, first attempting p1, and then p2 if p1 fails
+
+With this operations there are still parsers that we can't implement, for example if the type of second parser depends on the return of the first 
+one (context sensitive grammar). But similar to previous chapters, we can achieve this with the `flatMap` operation:
+
+```scala
+def flatMap[A,B](p: Parser[A])(f: A => Parser[B]): Parser[B]
+```
+
+### Writing a JSON parser
