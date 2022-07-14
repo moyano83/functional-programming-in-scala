@@ -11,6 +11,7 @@
 7. [Chapter 7: Purely functional parallelism](#Chapter7)
 8. [Chapter 8: Property-based testing](#Chapter8)
 9. [Chapter 9: Parser combinators](#Chapter9)
+10. [Chapter 10: Monoids](#Chapter10)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -512,7 +513,7 @@ def buildMsg[A](s: A, e: Exception): String = s"test: $s\n" + s"exception: ${e.g
 
 ### Test case minimization
 
-Ideally we’d like our framework to find the smallest or simplest failing test case, there are two general approaches we could take:
+Ideally we'd like our framework to find the smallest or simplest failing test case, there are two general approaches we could take:
 
     * Shrinking: After a failing test case, run a separate procedure to minimize the test case by decreasing its size until it no longer fails
     * Sized generation: generate our test cases in order of increasing size and complexity until we find a failure 
@@ -587,7 +588,7 @@ _Algebraic design_ is an evolution of this.
 
 ### Designing an algebra, first
 
-The laws referred before usually have come after we designed the API and types, but now we’ll start with the algebra, including its laws, and decide
+The laws referred before usually have come after we designed the API and types, but now we'll start with the algebra, including its laws, and decide
 on a representation later (known as _algebraic design_). On this example we'll choose to design a library for parsers, focusing on its expressiveness.
 The library should generate parser errors if it receives an input it doesn't expect.
 A good and simple domain to start with is parsing various combinations of letters like "dsakjdjaks". Let's start with a simple parser for a letter:
@@ -681,11 +682,11 @@ construct a `Parser` to see what portion of the input string it examines.
 def slice[A](p: Parser[A]): Parser[String] // run(slice(('a'|'b') .many))("aaba") results in Right("aaba")
 ```
 
-Note that there’s no implementation here yet. We’re still just coming up with our desired interface. Now we want to recognize one or more 'a'
-characters, so it seems we need some way of running one parser, followed by another, assuming the first is successful. Let’s add that:
+Note that there's no implementation here yet. We're still just coming up with our desired interface. Now we want to recognize one or more 'a'
+characters, so it seems we need some way of running one parser, followed by another, assuming the first is successful. Let's add that:
 
 ```scala
-// The second parameter is non strict cause if the first Parser fails, the second won’t even be consulted. We should change the or function in the 
+// The second parameter is non strict cause if the first Parser fails, the second won't even be consulted. We should change the or function in the 
 // same way
 def product[A, B](p: Parser[A], p2: => Parser[B]): Parser[(A, B)] 
 ```
@@ -709,11 +710,173 @@ Recap the primitives we have so far:
     * product(p1,p2): Sequences two parsers, running p1 and then p2, and returns the pair of their results if both succeed
     * or(p1,p2): Chooses between two parsers, first attempting p1, and then p2 if p1 fails
 
-With this operations there are still parsers that we can't implement, for example if the type of second parser depends on the return of the first 
+With this operations there are still parsers that we can't implement, for example if the type of second parser depends on the return of the first
 one (context sensitive grammar). But similar to previous chapters, we can achieve this with the `flatMap` operation:
 
 ```scala
-def flatMap[A,B](p: Parser[A])(f: A => Parser[B]): Parser[B]
+def flatMap[A, B](p: Parser[A])(f: A => Parser[B]): Parser[B]
 ```
 
 ### Writing a JSON parser
+
+Now we'll write a function that produces a JSON parser using only the set of primitives we've defined and any derived combinators.
+
+```scala
+def jsonParser[Err, Parser[+_]](P: Parsers[Err, Parser]): Parser[JSON] = {
+  import P._
+  val spaces = char(' ').many.slice
+  ???
+}
+```
+
+In FP, it's common to define an algebra and explore its expressiveness without having a concrete implementation.
+
+#### The JSON format
+
+The possible values of JSON datatypes are represented below:
+
+```scala
+trait JSON
+
+object JSON {
+  case object JNull extends JSON
+
+  case class JNumber(get: Double) extends JSON
+
+  case class JString(get: String) extends JSON
+
+  case class JBool(get: Boolean) extends JSON
+
+  case class JArray(get: IndexedSeq[JSON]) extends JSON
+
+  case class JObject(get: Map[String, JSON]) extends JSON
+}
+```
+
+### Error reporting
+
+None of the primitives so far let us assign an error message to a parser so we can introduce a primitive combinator for this called label:
+
+```scala
+def label[A](msg: String)(p: Parser[A]): Parser[A] // if p fails, its ParseError will incorporate msg
+```
+
+We can then have a parser that returns a type containing the error message and Location. But it is wrong to assume that one level of error reporting
+will always be sufficient. Let's therefore provide a way to nest labels:
+
+```scala
+def scope[A](msg: String)(p: Parser[A]): Parser[A]
+```
+
+This second implementation can return a List with the error type, representing a stack of error messages indicating what the Parser was doing when it
+failed. We can now revisit our Parsers trait, and simplify it like:
+
+```scala
+trait Parsers[Parser[+_]] {
+  def run[A](p: Parser[A])(input: String): Either[ParseError, A]
+}
+```
+
+When we have an error that occurs inside an or combinator, we need some way of determining which error(s) to report. For example in an `or` method
+call. So we need a primitive for letting the programmer indicate when to commit to a particular parsing branch so we'll allow something like
+**try running _p1_ on the input, and if it fails in an uncommitted state, try running _p2_ on the same input; otherwise, report the failure**.
+One common solution to this problem is to have all parsers commit by default if they examine at least one character to produce a result.
+
+### Implementing the algebra
+
+#### One possible implementation
+
+We know a parser needs to support the function run `def run[A](p: Parser[A])(input: String): Either[ParseError,A]`
+
+```scala
+type Parser[+A] = String => Either[ParseError, A]
+
+def string(s: String): Parser[A] = (input: String) =>
+  if (input.startsWith(s)) Right(s)
+  else Left(Location(input).toError("Expected: " + s))
+```
+
+#### Sequencing parsers
+
+If the parse of an input is successful, then we want to consider those characters consumed and run the next parser on the remaining characters.
+
+```scala
+type Parser[+A] = Location => Result[A] // that's either a success or a failure
+
+trait Result[+A]
+
+case class Success[+A](get: A, charsConsumed: Int) extends Result[A] // return a value of type A as well as the number of characters of input consumed
+
+case class Failure(get: ParseError) extends Result[Nothing] //
+```
+
+We get at the essence of what a Parser is, it's a kind of state action that can fail. It receives an input state, and if successful, returns a value
+as well as enough information to control how the state should be updated.
+
+#### Labeling parsers
+
+In the event of failure, we want to push a new message onto the ParseError stack. We introduce a helper function for this on `ParseError`: `push`
+
+```scala
+def push(loc: Location, msg: String): ParseError = copy(stack = (loc, msg) :: stack)
+// This allows us to define
+def scope[A](msg: String)(p: Parser[A]): Parser[A] = s => p(s).mapError(_.push(s.loc, msg))
+```
+
+The function mapError is defined on Result—it just applies a function to the failing case:
+
+```scala
+def mapError(f: ParseError => ParseError): Result[A] = this match {
+  case Failure(e) => Failure(f(e))
+  case _ => this
+}
+```
+
+#### Failover and backtracking
+
+We said that consuming at least one character should result in a committed parse. We can support the behavior we want by adding one more piece of
+information to the `Failure` case of `Result`: a Boolean value indicating whether the parser failed in a committed state:
+
+```scala
+case class Failure(get: ParseError, isCommitted: Boolean) extends Result[Nothing]
+```
+
+The implementation of `or` can simply check the isCommitted flag before running the second parser. In the parser _x_ or _y_, if _x_ succeeds, then the
+whole thing succeeds. If _x_ fails in a committed state, we fail early and skip running _y_. Otherwise, if _x_ fails in an uncommitted state, we run
+_y_ and ignore the result of _x_:
+
+```scala
+def or[A](x: Parser[A], y: => Parser[A]): Parser[A] = s => x(s) match {
+  case Failure(e, false) => y(s)
+  case r => r
+}
+```
+
+#### Context-sensitive parsing
+
+`flatMap` enables context-sensitive parsers by allowing the selection of a second parser to depend on the result of the first parser.
+
+```scala
+// We define the helper functions
+def advanceBy(n: Int): Location = copy(offset = offset + n)
+
+def addCommit(isCommitted: Boolean): Result[A] = this match {
+  case Failure(e, c) => Failure(e, c || isCommitted)
+  case _ => this
+}
+
+def addCommit(isCommitted: Boolean): Result[A] = this match {
+  case Failure(e, c) => Failure(e, c || isCommitted)
+  case _ => this
+}
+
+def flatMap[A, B](f: Parser[A])(g: A => Parser[B]): Parser[B] =
+  s => f(s) match {
+    case Success(a, n) => g(a)(s.advanceBy(n)) // Advance the source location before calling the second parser.
+      .addCommit(n != 0) // Commit if the first parser has consumed any characters.
+      .advanceSuccess(n) // If successful, we increment the number of characters consumed by n, to account for characters already consumed by f. 
+    case e@Failure(_, _) => e
+  }
+```
+
+## Chapter 10: Monoids<a name="Chapter10"></a>
