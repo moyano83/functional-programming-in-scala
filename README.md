@@ -12,6 +12,7 @@
 8. [Chapter 8: Property-based testing](#Chapter8)
 9. [Chapter 9: Parser combinators](#Chapter9)
 10. [Chapter 10: Monoids](#Chapter10)
+11. [Chapter 11: Monads](#Chapter11)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -880,3 +881,118 @@ def flatMap[A, B](f: Parser[A])(g: A => Parser[B]): Parser[B] =
 ```
 
 ## Chapter 10: Monoids<a name="Chapter10"></a>
+
+A _monoid_ is a simple structure which is defined only by its algebra. Other than satisfying the same laws, instances of the monoid interface may have
+little or nothing to do with one another.
+
+### What is a monoid?
+
+A monoid is a structure that complies with the following set of laws:
+
+    * It has an identity operation, for example in a string concatenation, the identity operator is the empty string
+    * It is associative, again with the string concatenation (s1+s2+s3) = (s1+s2)+s3 = s1+(s2+s3)
+
+A monoid consist on:
+
+    * Some type A
+    * An associative binary operation op, that combines two values of type A: op(op(x,y), z) == op(x, op(y,z)) for any x:A, y:A, z:A
+    * A value, zero: A, that is an identity for that operation: op(x, zero) == x and op(zero, x) == x for any x: A
+
+In scala this can be coded like:
+
+```scala
+trait Monoid[A] {
+  def op(a1: A, a2: A): A
+
+  def zero: A
+}
+```
+
+A Monoid it's simply a type A and an implementation of `Monoid[A]` that satisfies the laws.
+
+### Folding lists with monoids
+
+If you look at the signatures of foldLeft and foldRight on List, you might notice something about the argument types:
+
+```scala
+def foldRight[B](z: B)(f: (A, B) => B): B // If you replace the A type for B type, it follows the monoid rules
+def foldLeft[B](z: B)(f: (B, A) => B): B
+```
+
+The components of a monoid fit these arguments. For example with a list of Strings, we could simply pass the op and zero in order to reduce the list
+with the monoid and concatenate all the strings. It doesn't matter if we choose foldLeft or foldRight when folding with a monoid, we should get
+the same result. This is precisely because the laws of associativity and identity hold. Given this, we can write a general function concatenate
+that folds a list with a monoid:
+
+```scala
+def concatenate[A](as: List[A], m: Monoid[A]): A = as.foldLeft(m.zero)(m.op)
+def foldMap[A, B](as: List[A], m: Monoid[B])(f: A => B): B // This is an alternative in case A doesn't have a Monoid instance
+```
+
+### Associativity and parallelism
+
+The fact that a monoid's operation is associative means we can choose how we fold a data structure like a list. Furthermore, we can reduce a list
+using a _balanced fold_, which can be more efficient for some operations and also allows for parallelism, the more balanced tree structure can be
+more efficient in cases where the cost of each operation is proportional to the size of its arguments.
+
+### Example: Parallel parsing
+
+Imagine we wanted to count the number of words in a massive file. The strategy would be to split the file into manageable chunks, process several
+chunks in parallel, and then combine the results. We need to find a data structure that can handle partial results and can track the complete
+words seen so far.
+
+```scala
+sealed trait WC
+
+/**
+ * simplest case, we haven't seen any complete words yet
+ *
+ * @param chars the chars of the string
+ */
+case class Stub(chars: String) extends WC
+
+/**
+ * counting over the string "lorem ipsum do" would result in Part ("lorem", 1, "do") since there is no whitespace to the left of lorem or right of 
+ * do,we can't be sure if they're complete words, so we don't count them yet.
+ *
+ * @param lStub holds any partial word we've seen to the left of words
+ * @param words keeps the number of complete words we've seen  
+ * @param rStub holds any partial word we've seen to the right of words
+ */
+case class Part(lStub: String, words: Int, rStub: String) extends WC 
+```
+
+#### Monoid homomorphisms
+
+There's a law that holds for some functions between monoids called a _monoid homomorphism_. A monoid homomorphism _f_ between monoids _M_ and _N_
+obeys the following general law for all values x and y: `M.op(f(x), f(y)) == f(N.op(x, y))`, for example
+`"foo".length + "bar".length == ("foo" + "bar").length`.
+If two types that your library uses are monoids, and there exist functions between them, it's a good idea to think about whether those functions are
+expected to preserve the monoid structure and to check the monoid homomorphism law with automated tests.
+
+### Foldable data structures
+
+When working with data structures, we often don't care about the underlying structure type neither parameter type, we just care about the
+operations that allows us to fold, combine, concatenate... it's members, we can capture this on a trait:
+
+```scala
+trait Foldable[F[_]] {
+  def foldRight[A, B](as: F[A])(z: B)(f: (A, B) => B): B
+
+  def foldLeft[A, B](as: F[A])(z: B)(f: (B, A) => B): B
+
+  def foldMap[A, B](as: F[A])(f: A => B)(mb: Monoid[B]): B
+
+  def concatenate[A](as: F[A])(m: Monoid[A]): A = foldLeft(as)(m.zero)(m.op)
+}
+```
+
+We write it as `F[_]`, where the underscore indicates that _F_ is not a type but a type constructor that takes one type argument. This is called
+_higher-order type_ constructor or a _higher-kinded type_.
+
+### Composing monoids
+
+Monoids are _composable_, which means that if types _A_ and _B_ are monoids, then the tuple type (A, B) is also a monoid (called their product).
+The fact that multiple monoids can be composed into one means that we can perform multiple calculations simultaneously when folding a data structure. 
+
+## Chapter 11: Monads<a name="Chapter11"></a>
