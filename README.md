@@ -13,6 +13,7 @@
 9. [Chapter 9: Parser combinators](#Chapter9)
 10. [Chapter 10: Monoids](#Chapter10)
 11. [Chapter 11: Monads](#Chapter11)
+12. [Chapter 12: Applicative and traversable functors](#Chapter12)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -993,6 +994,208 @@ _higher-order type_ constructor or a _higher-kinded type_.
 ### Composing monoids
 
 Monoids are _composable_, which means that if types _A_ and _B_ are monoids, then the tuple type (A, B) is also a monoid (called their product).
-The fact that multiple monoids can be composed into one means that we can perform multiple calculations simultaneously when folding a data structure. 
+The fact that multiple monoids can be composed into one means that we can perform multiple calculations simultaneously when folding a data structure.
 
 ## Chapter 11: Monads<a name="Chapter11"></a>
+
+### Functors: generalizing the map function
+
+The previous `map` operations defined on the examples before were the same except for the type the operation was applied to. We can capture as a Scala
+trait the idea of “a data type that implements map':
+
+```scala
+trait Functor[F[_]] {
+  def map[A, B](fa: F[A])(f: A => B): F[B]
+}
+```
+
+The Functor trait is parametric in the choice of F. Here's an instance for List:
+
+```scala
+val listFunctor = new Functor[List] {
+  def map[A, B](as: List[A])(f: A => B): List[B] = as map f
+}
+```
+
+We say that a type constructor like `List` or `Option` or `F` is a functor, and the `Functor[F]` instance constitutes proof that F is in fact a
+functor. For example, if we have `F[(A, B)]` where F is a functor, we can "distribute" the F over the pair to get `(F[A], F[B])`:
+
+```scala
+trait Functor[F[_]] {
+  def distribute[A, B](fab: F[(A, B)]): (F[A], F[B]) = (map(fab)(_._1), map(fab)(_._2))
+}
+```
+
+As it can be seen this is similar to the List's `unzip` function, which means we can write a generic unzip function that works for any functor.
+We can also construct the opposite operation over a sum or coproduct:
+
+```scala
+def codistribute[A, B](e: Either[F[A], F[B]]): F[Either[A, B]] = e match {
+  case Left(fa) => map(fa)(Left(_))
+  case Right(fb) => map(fb)(Right(_))
+}
+```
+
+#### Functor laws
+
+Let's consider the laws the functor should have, starting with the identity: `map(x)(a => a) == x` which means that `map(x)` preserves the structure
+of _x_. Only the elements of the structure are modified by map; the shape or structure itself is left intact. This kind of algebraic reasoning can
+potentially save us a lot of work, since we don't have to write separate tests for these properties.
+
+### Monads: generalizing the flatMap and unit functions
+
+Next, we'll look at a more interesting interface, `Monad`. For several of the data types we've seen (`Parser`, `Gen`, `Par`, `Option`) we have
+implemented `map2` to 'lift' a function taking two arguments:
+
+```scala
+def map2[A, B, C](fa: F[A], fb: F[B])(f: (A, B) => C): F[C] = fa flatMap (a => fb map (b => f(a, b))) // Replace F by Parser, Gen, Par...
+```
+
+#### The Monad trait
+
+Given the above, we can come up with a Scala trait for Monad that defines `map2` and numerous other functions, avoiding duplicating their definitions
+for every concrete data type. The above map2 function can be generalized in a trait:
+
+```scala
+trait Mon[F[_]] {
+  def flatMap[A, B](fa: F[A])(f: A => F[B]): F[B]
+
+  def map[A, B](fa: F[A])(f: A => B): F[B] // Added so the above function uses this methods
+
+  def map2[A, B, C](fa: F[A], fb: F[B])(f: (A, B) => C): F[C] = fa flatMap (a => fb map (b => f(a, b))) // Doesn't compile as we don't know about F
+}
+```
+
+Notice that we inspected the implementation of map2, and added all the functions it called, map and flatMap, as suitably abstract methods on our
+interface. These methods are our set of primitives, that can be refined further. In previous sections `unit` was defined and `map` can be implemented
+in terms of `flatMap` and `unit` (these 2 can be our minimal set of primitives):
+
+```scala
+trait Mon[F[_]] {
+  def unit[A](a: => A): F[A]
+
+  def flatMap[A, B](fa: F[A])(f: A => F[B]): F[B]
+
+  def map[A, B](fa: F[A])(f: A => B): F[B] = flatMap(ma)(a => unit(f(a)))
+
+  def map2[A, B, C](fa: F[A], fb: F[B])(f: (A, B) => C): F[C] = fa flatMap (a => fb map (b => f(a, b))) // Doesn't compile as we don't know about F
+}
+
+// To tie the above to a concrete data type
+object Monad {
+  val genMonad = new Monad[Gen] {
+    def unit[A](a: => A): Gen[A] = Gen.unit(a)
+
+    def flatMap[A, B](ma: Gen[A])(f: A => Gen[B]): Gen[B] = ma flatMap f
+  }
+}
+```
+
+### Monadic combinators
+
+Now let's revisit combinators seen on previous chapters and implement them in terms of Monad. For example the `Product` function that was
+implemented in terms of `map2`:
+
+```scala
+def product[A, B](ma: F[A], mb: F[B]): F[(A, B)] = map2(ma, mb)((_, _))
+```
+
+### Monad laws
+
+We know the functor laws to also hold for `Monad`, since a `Monad[F]` is a `Functor[F]`, but there are other laws that constraint `Monad`
+
+#### The associative law
+
+Monads comply with the associative law (holds for all values `x`, `f`, and `g` of the appropriate types):
+
+```scala
+x.flatMap(f).flatMap(g) == x.flatMap(a => f(a).flatMap(g))
+```
+
+#### Proving the associative law for a specific monad: Kleisli composition
+
+There's a way we can prove the law associative law if we consider not the monadic values of types like F[A], but monadic functions of types
+like A => F[B]. Functions like that are called Kleisli arrows, and they can be composed with one another:
+
+```scala
+def compose[A, B, C](f: A => F[B], g: B => F[C]): A => F[C]
+```
+
+#### The identity laws
+
+There's an identity element for compose in a monad. That's exactly what `unit` is:
+
+```scala
+def unit[A](a: => A): F[A]
+```
+
+### Just what is a monad?
+
+Usually interfaces provides a relatively complete API for an abstract data type, abstracting over the specific representation. `Monad`, like`Monoid`,
+is a more abstract, purely algebraic interface. The Monad combinators are just a small fragment of the full API for a given data type that happens to
+be a monad. So Monad doesn't generalize one type or another; rather, many vastly different data types can satisfy the Monad interface and laws. We've
+seen three minimal sets of primitive Monad combinators, and instances of Monad will have to provide implementations of one of these sets:
+
+    * unit and flatMap
+    * unit and compose 
+    * unit, map, and join
+
+Plus there are two monad laws to be satisfied:
+
+    * associativity
+    *identity
+
+A monad is an implementation of one of the minimal sets of monadic combinators, satisfying the laws of associativity and identity. A monad is
+defined by its operations and laws.
+
+#### The identity monad
+
+The simple case of monad is the identity monad:
+
+```scala
+case class Id[A](value: A)
+```
+
+The wrapped type and the unwrapped type are totally isomorphic: we can go from one to the other and back again without any loss of information:
+
+```scala
+for {
+  a <- Id("Hello, ") // This is transformed in a flatMap, which simply extract the value "Hello, "
+  b <- Id("monad!")
+} yield a + b // returns Id("Hello, monad!")
+```
+
+We could say that monads provide a context for introducing and binding variables, and performing variable substitution.
+
+#### The State monad and partial type application
+
+The type `State` seen previously fits the profile for being a monad. But its type constructor takes two type arguments, and Monad requires a type
+constructor of one argument. But if we choose some particular _S_, then we have something like `State[S, _]`, which is the kind of thing expected by
+`Monad`. So State doesn't just have one monad instance but a whole family of them, one for each choice of _S_:
+
+```scala
+type IntState[A] = State[Int, A]
+
+object IntStateMonad extends Monad[IntState] {
+  def unit[A](a: => A): IntState[A] = State(s => (a, s))
+
+  def flatMap[A, B](st: IntState[A])(f: A => IntState[B]): IntState[B] =
+    st flatMap f
+}
+```
+
+Scala allows us to use a more terse definition:
+
+```scala
+object IntStateMonad extends Monad[({type IntState[A] = State[Int, A]})#IntState] {} // Here we define an anonymous type within the parentheses
+```
+
+A type constructor declared inline like this is often called a _type lambda_ in Scala. This anonymous type has, as one of its members, the type alias
+IntState, which looks just like before. Outside the parentheses we're then accessing its IntState member with the # syntax.
+`State` also had the operations `setState` and `getState` and together with the monadic `unit` and `flatMap` constitutes the set of primitive
+operations for this type.
+We can use `getState` and `setState` in a for comprehension because at each line in the for-comprehension, the implementation of `flatMap` is
+making sure that the current state is available to getState, and that the new state gets propagated to all actions that follow a `setState`.
+The Monad contract doesn't specify what happens between the lines, only that whatever happens satisfies the laws of associativity and identity.
+
+## Chapter 12: Applicative and traversable functors<a name="Chapter12"></a>
