@@ -14,6 +14,8 @@
 10. [Chapter 10: Monoids](#Chapter10)
 11. [Chapter 11: Monads](#Chapter11)
 12. [Chapter 12: Applicative and traversable functors](#Chapter12)
+13. [Chapter 13: External effects and I/O](#Chapter13)
+14. [Chapter 14: Local effects and mutable state](#Chapter14)
 
 ## Chapter 1: What is functional programming?<a name="Chapter1"></a>
 
@@ -1199,3 +1201,373 @@ making sure that the current state is available to getState, and that the new st
 The Monad contract doesn't specify what happens between the lines, only that whatever happens satisfies the laws of associativity and identity.
 
 ## Chapter 12: Applicative and traversable functors<a name="Chapter12"></a>
+
+In this chapter we'll develop a monad for I/O (writing to a file, read from a DB). The IO monad provides a straightforward way of embedding imperative
+programming with I/O effects in a pure program while preserving referential transparency. This will illustrate a key technique for dealing with
+external effects—using pure functions to compute a description of an effectful computation, which is then executed by a separate interpreter that
+actually performs those effects.
+
+### Factoring effects
+
+It is always possible to factor an impure procedure into a pure "core" function and two procedures with side effects: one that supplies the pure
+function's input and one that does something with the pure function's output. We can formalize this insight a bit. Given an impure function `f` of
+type `A => B`, we can split f into two functions:
+
+    * A pure function of type A => D, where D is some description of the result of f
+    * An impure function of type D => B, which can be thought of as an interpreter of these descriptions
+
+### A simple IO type
+
+Procedures like `println` can be factored in much the same way, by introducing a new data type that we'll call IO:
+
+```scala
+trait IO {
+  def run: Unit
+}
+
+def PrintLine(msg: String): IO =
+  new IO {
+    def run = println(msg)
+  }
+
+def func(v1: Value, v2: Value): IO = PrintLine(v1.compareTo(v2))
+```
+
+In this example, `func` simply describes an action that needs to take place, but doesn't actually execute it. We say `func` has an _effect_ or is
+_effectful_, but it's only the interpreter of `IO` that actually has a side effect. We can define more operations:
+
+```scala
+trait IO {
+  self =>
+  def run: Unit
+
+  def ++(io: IO): IO = new IO {
+
+    def run = {
+      self.run;
+      io.run
+    }
+  }
+}
+
+object IO {
+  def empty: IO = new IO {
+    def run = ()
+  }
+}
+```
+
+As it can be seen, IO is now a monoid, with empty as the identity and `++` as the associative operation.
+
+#### Handling input effects
+
+So far the `IO` type can represent only output effects. There's no way to express `IO` computations that waits for input from some external source.
+In Scala, `readLine` is a `def` with the side effect of capturing a line of input from the console and returns a String. We could wrap a call to
+readLine in `IO`, but we have nowhere to put the result as we don't have a way of representing this sort of effect. The current `IO` type can't
+express computations that yield a value. We need to extend our `IO` type to allow input, by adding a type parameter:
+
+```scala
+sealed trait IO[A] {
+  self =>
+  def run: A
+
+  def map[B](f: A => B): IO[B] =
+    new IO[B] {
+      def run = f(self.run)
+    }
+
+  def flatMap[B](f: A => IO[B]): IO[B] =
+    new IO[B] {
+      def run = f(self.run).run
+    }
+}
+```
+
+We've added map and flatMap functions so IO can be used in for-comprehensions. And IO now forms a Monad:
+
+```scala
+object IO extends Monad[IO] {
+  def unit[A](a: => A): IO[A] = new IO[A] {
+    def run = a
+  }
+
+  def flatMap[A, B](fa: IO[A])(f: A => IO[B]) = fa flatMap f
+
+  def apply[A](a: => A): IO[A] = unit(a)
+}
+```
+
+With this in place, we can define a converter from Farenheit to Celsius that requires the user to input the temperature:
+
+```scala
+def fahrenheitToCelsius(f: Double): Double = (f - 32) * 5.0 / 9.0
+def ReadLine: IO[String] = IO {
+  readLine
+}
+def PrintLine(msg: String): IO[Unit] = IO {
+  println(msg)
+}
+def converter: IO[Unit] = for {
+  _ <- PrintLine("Enter a temperature in degrees Fahrenheit: ")
+  d <- ReadLine.map(_.toDouble)
+  _ <- PrintLine(fahrenheitToCelsius(d).toString)
+} yield ()
+```
+
+Note that `converter` does not have side effects and it's a referentially transparent description of a computation with effects, and `converter.run`
+is the interpreter that will actually execute those effects.
+
+#### Benefits and drawbacks of the simple IO type
+
+The usage of an `IO` monad like what we have so far is important because _clearly separates pure code from impure code_. Some benefits it has   :
+
+    * IO computations are ordinary values. We can store them in lists, pass them to functions, create them dynamically...
+    * Seeing IO as values allows for crafting more interesting interpreters than the simple run method baked into the IO type itself.
+
+But this implementation also has its drawbacks:
+
+    * Many IO programs will overflow the runtime call stack and throw a StackOverflowError, specially for larger programs
+    * A value of type IO[A] is completely opaque. It's really just a lazy identity, a function that takes no arguments
+    * This simple IO[A] has nothing at all to say about concurrency or asynchronous operations 
+
+### Avoiding the StackOverflowError
+
+Consider the program
+
+```scala
+val p = IO.forever(PrintLine("Still going..."))
+def flatMap[B](f: A => IO[B]): IO[B] = new IO[B] {
+  def run = f(self.run).run // creates a new IO object whose run definition calls run again before calling f
+}
+```
+
+This will keep building up nested run calls on the stack and eventually overflow it.
+
+#### Reifying control flow as data constructors
+
+The solution is surprisingly simple. Instead of letting program control just flow through with function calls, we explicitly bake into our data type
+the control flow that we want to support: instead of making `flatMap` a method that constructs a new `IO` in terms of run, we can just make it a data
+constructor of the `IO` data type (and we can then use tail recursion).
+
+```scala
+sealed trait IO[A] {
+  def flatMap[B](f: A => IO[B]): IO[B] = FlatMap(this, f)
+
+  def map[B](f: A => B): IO[B] = flatMap(f andThen (Return(_)))
+}
+
+// represents an IO action that has finished
+case class Return[A](a: A) extends IO[A]
+
+// means that we want to execute some effect to produce a result
+case class Suspend[A](resume: () => A) extends IO[A]
+
+// lets us extend or continue an existing computation by using the result of the first computation to produce a second computation
+case class FlatMap[A, B](sub: IO[A], k: A => IO[B]) extends IO[B] 
+```
+
+This new `IO` type has three data constructors, representing the three different kinds of control flow that we want the interpreter of this data type
+to support. An interpreter to evaluate this type of IO can be:
+
+```scala
+@annotation.tailrec def run[A](io: IO[A]): A = io match {
+  case Return(a) => a
+  case Suspend(r) => r()
+  case FlatMap(x, f) => x match {
+    case Return(a) => run(f(a))
+    case Suspend(r) => run(f(r()))
+    case FlatMap(y, g) => run(y flatMap (a => g(a) flatMap f))
+  }
+}
+```
+
+Note that instead of saying `run(f(run(x)))` in the `FlatMap(x,f)` case, we instead pattern match on `x`, since it can only be one of three things
+and we keep the tail recursion. In order to continue running the program in this last case, we want to do is look at y to see if it is another FlatMap
+constructor, but the expression may be arbitrarily deep and we want to remain tail-recursive. We reassociate this to the right, effectively turning
+`(y flatMap g) flatMap f` into `y flatMap(a => g(a) flatMap f)`. A function like run is sometimes called a trampoline, and the overall technique
+of returning control to a single loop to eliminate the stack is called trampolining.
+
+#### Trampolining: a general solution to stack overflow
+
+The IO type we have so far is a general data structure for trampolining computations, even pure computations that don't do any I/O at all. The
+_StackOverflowError_ problem manifests itself in Scala wherever we have a composite function that consists of more function calls than there's
+space for on the call stack, but we can solve this with the IO monad:
+
+```scala
+sealed trait TailRec[A] {
+  def flatMap[B](f: A => TailRec[B]): TailRec[B] = FlatMap(this, f)
+
+  def map[B](f: A => B): TailRec[B] = flatMap(f andThen (Return(_)))
+}
+
+case class Return[A](a: A) extends TailRec[A]
+
+case class Suspend[A](resume: () => A) extends TailRec[A]
+
+case class FlatMap[A, B](sub: TailRec[A], k: A => TailRec[B]) extends TailRec[B]
+```
+
+We can use the `TailRec` data type to add trampolining to any function type `A => B` by modifying the return type B to `TailRec[B]` instead. The
+program just had to be modified to use `flatMap` in function composition and to `Suspend` before every function call. Using `TailRec` can be slower
+than direct function calls, but its advantage is that we gain predictable stack usage.
+
+### A more nuanced IO type
+
+The above example doesn't solve the problems of not being fit for multithreading (it blocks the current thread on execution) and not being
+explicit with the side effects. The second problem can be solved by replacing the `TailRec` type for other parallel types seen before. We can go
+even further and use a type constructor for the instead of the type A:
+
+```scala
+sealed trait Free[F[_], A]
+
+case class Return[F[_], A](a: A) extends Free[F, A]
+
+case class Suspend[F[_], A](s: F[A]) extends Free[F, A]
+
+case class FlatMap[F[_], A, B](s: Free[F, A], f: A => Free[F, B]) extends Free[F, B]
+```
+
+#### Reasonably priced monads
+
+The Return and FlatMap constructors witness that this data type is a monad for any choice of F, and since they're exactly the operations required to
+generate a monad, we say that it's a free monad. `Free[F,A]` is a recursive structure that contains a value of type `A` wrapped in zero or more
+layers of `F`.
+
+#### A monad that supports only console I/O
+
+We can try now to implement an interaction with the console:
+
+```scala
+sealed trait Console[A] {
+  def toPar: Par[A]
+
+  def toThunk: () => A
+}
+
+case object ReadLine extends Console[Option[String]] {
+  def toPar = Par.lazyUnit(run)
+
+  def toThunk = () => run
+
+  def run: Option[String] = try Some(readLine()) catch {
+    case e: Exception => None
+  }
+}
+
+case class PrintLine(line: String) extends Console[Unit] {
+  def toPar = Par.lazyUnit(println(line))
+
+  def toThunk = () => println(line)
+}
+```
+
+In the above example, Console can only take the form of input (ReadLine) or Output (PrintLine), which can be used in the `Free` Monad:
+
+```scala
+object Console {
+  type ConsoleIO[A] = Free[Console, A]
+
+  def readLn: ConsoleIO[Option[String]] = Suspend(ReadLine)
+
+  def printLn(line: String): ConsoleIO[Unit] = Suspend(PrintLine(line))
+}
+```
+
+And use it in a program to interact with the console:
+
+```scala
+val f1: Free[Console, Option[String]] = for {
+  _ <- printLn("I can only interact with the console.")
+  ln <- readLn
+} yield ln
+```
+
+How do we construct a program from this? The signature previously created for _run_ was:
+
+```scala
+def run[F[_], A](a: Free[F, A])(implicit F: Monad[F]): F[A]
+```
+
+We need a `Monad[F]` that we don't have, so we need to translate the type:
+
+```scala
+trait Translate[F[_], G[_]] {
+  def apply[A](f: F[A]): G[A]
+}
+
+type ~>[F[_], G[_]] = Translate[F, G]
+
+val consoleToFunction0 = new (Console ~> Function0) {
+  def apply[A](a: Console[A]) = a.toThunk
+}
+val consoleToPar = new (Console ~> Par) {
+  def apply[A](a: Console[A]) = a.toPar
+}
+```
+
+So we can generalize _run_:
+
+```scala
+def runFree[F[_], G[_], A](free: Free[F, A])(t: F ~> G)(
+  implicit G: Monad[G]): G[A] =
+  step(free) match {
+    case Return(a) => G.unit(a)
+    case Suspend(r) => t(r)
+    case FlatMap(Suspend(r), f) => G.flatMap(t(r))(a => runFree(f(a))(t))
+    case _ => sys.error("Impossible; `step` eliminates these cases")
+  }
+```
+
+#### Pure interpreters
+
+Note that `ConsoleIO` type does not imply that any effects occurs, that's the responsibility of the interpreter.
+
+### Non-blocking and asynchronous I/O
+
+In the examples before, when we encountered a `Suspend(s)`, `s` will be of type `Console` and we'll have a translation `f` from `Console` to the
+target monad. To allow for non-blocking asynchronous I/O, we simply change the target monad from `Function0` to a concurrency monad such as
+`scala.concurrent.Future`. In this way we can write both blocking and non-blocking interpreters just by varying the target monad.
+A non-blocking source of bytes might have an interface like this:
+
+```scala
+trait Source {
+  def readBytes(numBytes: Int, callback: Either[Throwable, Array[Byte]] => Unit): Unit // returns inmediately
+}
+```
+
+### A general-purpose IO type
+
+For any given set of I/O operations that we want to support, we can write an ADT whose case classes represent the individual operations. For any
+data type `F`, we can generate a free monad `Free[F,A]` in which to write our programs:
+
+```scala
+type IO[A] = Free[Par, A]
+```
+
+#### The main program at the end of the universe
+
+When the JVM calls into our main program, it expects a main method with a specific signature. The return type of this method is Unit, meaning that
+it's expected to have some side effects. But we can delegate to a pureMain program that's entirely pure. The only thing the main method does in that
+case is interpret our pure program, actu- ally performing the effects.
+
+```scala
+abstract class App {
+
+  import java.util.concurrent._
+
+  def unsafePerformIO[A](a: IO[A])(pool: ExecutorService): A = Par.run(pool)(run(a)(parMonad))
+
+  def main(args: Array[String]): Unit = {
+    val pool = Executors.fixedThreadPool(8)
+    unsafePerformIO(pureMain(args))(pool)
+  }
+
+  def pureMain(args: IndexedSeq[String]): IO[Unit] // the actual program goes here, as an implementation of pureMain in a subclass of App
+}
+```
+
+### Why the IO type is insufficient for streaming I/O
+
+Writing efficient, streaming I/O will generally involve monolithic loops, but monolithic loops are not composable.
+
+## Chapter 14: Local effects and mutable state<a name="Chapter14"></a>
